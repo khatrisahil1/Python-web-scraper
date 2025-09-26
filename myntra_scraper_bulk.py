@@ -1,6 +1,5 @@
 # myntra_scraper_bulk.py
 import time
-import math
 import pandas as pd
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -12,18 +11,16 @@ from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
-import sys
 
-INPUT_CSV = "urls.csv"            # expects a column "URL"
-OUTPUT_XLSX = "myntra_bulk_output.xlsx"
+INPUT_CSV = "urls.csv"          # update as needed
+OUTPUT_XLSX = "myntra_bulk_output_v2.xlsx"
 PINCODE = "400706"
-DELAY_BETWEEN = 2.2                   # seconds between pages (tweakable)
+DELAY_BETWEEN = 2.2
 RETRY_LIMIT = 3
-SAVE_EVERY = 20                       # save to file every N results
-RESTART_EVERY = 200                   # restart browser every N pages to avoid leaks
-HEADLESS = False                      # set True to run headless
+SAVE_EVERY = 20
+RESTART_EVERY = 200
+HEADLESS = False
 
-# --- driver helpers (same ideas as single script) ---
 def start_driver(headless=False):
     chrome_options = Options()
     if headless:
@@ -31,7 +28,6 @@ def start_driver(headless=False):
         chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1400,1000")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    # Optional user-agent rotation could be added here later
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=chrome_options)
     driver.maximize_window()
@@ -75,6 +71,12 @@ def enter_pincode(driver, pincode):
     return False
 
 def click_first_size(driver):
+    """
+    Returns:
+      True -> clicked a size (assume desired size available)
+      False -> no size clicked
+      'no_desired' -> size options exist but not desired size (useful if you want to check specific size text)
+    """
     try:
         candidates = [
             "div.pdp-size-layout .size-buttons button",
@@ -82,9 +84,11 @@ def click_first_size(driver):
             "button.size-buttons",
             "div.size-list button"
         ]
+        found_any = False
         for sel in candidates:
             elems = driver.find_elements(By.CSS_SELECTOR, sel)
             if elems:
+                found_any = True
                 for e in elems:
                     try:
                         if e.is_displayed() and e.is_enabled():
@@ -100,6 +104,7 @@ def click_first_size(driver):
                             return True
                         except Exception:
                             continue
+        # fallback: check for size abbreviations but do not click if unavailable
         buttons = driver.find_elements(By.TAG_NAME, "button")
         for b in buttons:
             txt = b.text.strip().upper()
@@ -110,13 +115,14 @@ def click_first_size(driver):
                     return True
                 except Exception:
                     continue
+        if found_any:
+            return 'no_desired'
     except Exception:
         pass
     return False
 
 def find_seller_name(driver):
     try:
-        # Try direct text containing 'Sold by' or 'Seller'
         try:
             sold_by_elem = driver.find_element(By.XPATH, "//*[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'sold by') or contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'seller')]")
         except Exception:
@@ -151,7 +157,6 @@ def find_seller_name(driver):
         pass
     return None
 
-# --- single-page scraped wrapped with retries ---
 def scrape_single_with_retries(driver, url):
     attempt = 0
     last_exc = None
@@ -161,25 +166,19 @@ def scrape_single_with_retries(driver, url):
             WebDriverWait(driver, 8).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
             time.sleep(1.0)
             enter_pincode(driver, PINCODE)
-            click_first_size(driver)
+            size_click_res = click_first_size(driver)
             seller = find_seller_name(driver)
-            return seller
+            return size_click_res, seller, None  # None for no exception
         except WebDriverException as e:
             last_exc = e
             attempt += 1
             wait = 1.5 * (2 ** attempt)
             print(f"Webdriver error on attempt {attempt} for {url}. Waiting {wait:.1f}s then retrying...")
             time.sleep(wait)
-            # try to recover by restarting the driver externally (handled by caller)
-    print(f"Failed to scrape {url} after {RETRY_LIMIT} attempts. Last exception: {last_exc}")
-    return None
+    return None, None, last_exc
 
 def run_bulk():
     df_input = pd.read_csv(INPUT_CSV)
-    if "URL" not in df_input.columns:
-        print("Input CSV must contain column named 'URL'.")
-        return
-
     results = []
     driver = start_driver(headless=HEADLESS)
     processed = 0
@@ -189,37 +188,66 @@ def run_bulk():
         for idx, row in df_input.iterrows():
             url = str(row["URL"]).strip()
             if not url:
-                results.append({"URL": url, "Seller Name": ""})
+                results.append({"URL": url, "Seller Name": "", "Status": "404", "Notes": "Empty URL"})
                 continue
 
-            # Optionally restart driver every RESTART_EVERY pages
             if processed and processed % RESTART_EVERY == 0:
-                print("Restarting browser to avoid session problems...")
-                try:
-                    driver.quit()
-                except Exception:
-                    pass
+                driver.quit()
                 driver = start_driver(headless=HEADLESS)
                 restart_count += 1
                 time.sleep(1)
 
-            seller = scrape_single_with_retries(driver, url)
-            results.append({"URL": url, "Seller Name": seller or ""})
+            size_click_res, seller, exc = scrape_single_with_retries(driver, url)
+            status = ""
+            notes = ""
+            if exc:
+                status = "500"
+                notes = f"webdriver_error: {type(exc).__name__}"
+                seller = seller or ""
+            else:
+                # interpret size result
+                if size_click_res is True:
+                    # clicked a size OK
+                    if seller:
+                        status = "200"
+                        notes = "success"
+                    else:
+                        status = "404"
+                        notes = "seller_not_found"
+                elif size_click_res == 'no_desired':
+                    status = "401"
+                    notes = "size_options_present_but_no_clickable"
+                elif size_click_res is False:
+                    # no size options found; maybe one-size or page layout different
+                    if seller:
+                        status = "200"
+                        notes = "success_no_size_needed"
+                    else:
+                        status = "404"
+                        notes = "seller_not_found_no_size"
+                else:
+                    status = "500"
+                    notes = "unknown_flow"
+
+            results.append({
+                "URL": url,
+                "Seller Name": seller or "",
+                "Status": status,
+                "Notes": notes
+            })
             processed += 1
-            print(f"[{processed}/{len(df_input)}] {url} -> {seller}")
-            # save periodically
+            print(f"[{processed}/{len(df_input)}] {url} -> {seller} (status {status})")
+
             if processed % SAVE_EVERY == 0:
                 pd.DataFrame(results).to_excel(OUTPUT_XLSX, index=False)
                 print(f"Saved intermediate results to {OUTPUT_XLSX}")
 
-            time.sleep(DELAY_BETWEEN)  # polite pause
-
+            time.sleep(DELAY_BETWEEN)
     finally:
         try:
             driver.quit()
         except Exception:
             pass
-        # final save
         pd.DataFrame(results).to_excel(OUTPUT_XLSX, index=False)
         print(f"Finished. Final results saved to {OUTPUT_XLSX}. Browser restarted {restart_count} times.")
 

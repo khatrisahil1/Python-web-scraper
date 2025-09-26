@@ -12,7 +12,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 
-URL = "https://www.myntra.com/tshirts/adidas+originals/adidas-originals-women-typography-printed-v-neck-relaxed-fit-t-shirt/35713564/buy"
+URL = "https://www.myntra.com/saree/tikhi-imli/tikhi-imli-embellished-embroidered-net-saree/30711854/buy?utm_source=social_share_pdp&utm_medium=deeplink&utm_campaign=social_share_pdp_deeplink"
 PINCODE = "400706"
 OUTPUT_XLSX = "myntra_output_one.xlsx"
 
