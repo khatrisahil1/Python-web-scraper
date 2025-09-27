@@ -12,8 +12,8 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 
-URL = "https://www.myntra.com/saree/tikhi-imli/tikhi-imli-embellished-embroidered-net-saree/30711854/buy?utm_source=social_share_pdp&utm_medium=deeplink&utm_campaign=social_share_pdp_deeplink"
-PINCODE = "400706"
+URL = "https://www.myntra.com/track-pants/cult/cult-men-train-in-train-out-moisture-wicking-premium-trackpants/29417146/buy"
+PINCODE = "560037"
 OUTPUT_XLSX = "myntra_output_one.xlsx"
 
 def start_driver(headless=False):
@@ -173,11 +173,53 @@ def find_seller_name(driver):
         print("Error while finding seller:", e)
     return None
 
+def get_delivery_info(driver):
+    selectors = [
+        "#mountRoot > div > div:nth-child(1) > main > div.pdp-details.common-clearfix > div.pdp-description-container > div:nth-child(2) > div:nth-child(4) > div > div > ul > li:nth-child(1) > h4",
+        "div.delivery-info h4",          # fallback selector 1
+        "li.delivery-option h4"          # fallback selector 2
+    ]
+    for sel in selectors:
+        try:
+            elem = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
+            if elem.text.strip():
+                text = elem.text.strip()
+                # Remove "Get it by" prefix and any trailing pincode info
+                if text.lower().startswith("get it by"):
+                    text = text[len("get it by"):].strip()
+                if " - " in text:
+                    text = text.split(" - ")[0].strip()
+                return text
+        except Exception:
+            continue
+    # fallback: scan page text for a "get it by" line
+    try:
+        body_text = driver.find_element(By.TAG_NAME, "body").text
+        for line in body_text.splitlines():
+            if "get it by" in line.lower():
+                text = line.strip()
+                if text.lower().startswith("get it by"):
+                    text = text[len("get it by"):].strip()
+                if " - " in text:
+                    text = text.split(" - ")[0].strip()
+                return text
+    except Exception:
+        pass
+    return None
+
 def scrape_one(url, headless=False):
     driver = start_driver(headless=headless)
+    # Initialize result dictionary with required columns
+    data = {
+        "URL": url,
+        "SellerNames": "",
+        "SellerIDs": "",
+        "Delivery": "",
+        "Status": "404",
+        "Notes": ""
+    }
     try:
         driver.get(url)
-        # wait for basic page load
         WebDriverWait(driver, 8).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         time.sleep(1.2)  # let dynamic parts load
         pincode_entered = enter_pincode(driver, PINCODE)
@@ -196,19 +238,33 @@ def scrape_one(url, headless=False):
         seller = find_seller_name(driver)
         if seller:
             print("Found seller:", seller)
+            data["SellerNames"] = seller
         else:
             print("Seller not found with current selectors. Inspect the page and update selectors.")
-            # Optionally capture partial page snapshot or HTML to debug
-            with open("debug_page.html", "w", encoding="utf-8") as f:
-                f.write(driver.page_source)
-            print("Saved debug_page.html for inspection.")
-        return seller
+            data["Notes"] += "Seller not found; "
+
+        delivery = get_delivery_info(driver)
+        if delivery:
+            print("Found delivery:", delivery)
+            data["Delivery"] = delivery
+        else:
+            print("Delivery not found using the specified selector.")
+            data["Notes"] += "Delivery not found; "
+
+        if seller or delivery:
+            data["Status"] = "200"
+        else:
+            data["Status"] = "404"
+        # SellerIDs remains empty as no extraction logic provided
+        return data
     finally:
         driver.quit()
 
 def main():
-    seller = scrape_one(URL, headless=False)  # make headless=True if you don't want browser UI
-    df = pd.DataFrame([{"URL": URL, "Seller Name": seller or ""}])
+    result = scrape_one(URL, headless=False)  # set headless=True if desired
+    # Build DataFrame with required columns
+    import pandas as pd
+    df = pd.DataFrame([result])  # columns: URL, SellerNames, SellerIDs, Delivery, Status, Notes
     df.to_excel(OUTPUT_XLSX, index=False)
     print(f"Saved results to {OUTPUT_XLSX}")
 
