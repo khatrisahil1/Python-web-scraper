@@ -51,7 +51,7 @@ def start_driver(headless=False):
     driver.maximize_window()
     return driver
 
-# --- Helper Functions (Updated for robustness) ---
+# --- Helper Functions  ---
 def safe_find(driver, by, value, timeout=10):
     try:
         return WebDriverWait(driver, timeout).until(EC.presence_of_element_located((by, value)))
