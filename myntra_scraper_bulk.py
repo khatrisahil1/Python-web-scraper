@@ -1,4 +1,6 @@
-# myntra_scraper_bulk.py - FINAL WITH SELLER NAME FIX, ROBUSTNESS, AND URL INDEX
+# myntra_scraper_bulk_sequential.py - Sequential single-driver processing
+
+
 import time
 import pandas as pd
 from selenium import webdriver
@@ -12,7 +14,6 @@ from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 
 # --- Configuration Parameters ---
@@ -20,10 +21,10 @@ CONFIG = {
     "PINCODE": "560037",
     "INPUT_XLSX": "dataset_20k.xlsx",
     "OUTPUT_XLSX": "myntra_output_two.xlsx",
-    "NUM_WORKERS": 4,
-    "URL_LIMIT": 500,
+    "NUM_WORKERS": 1,            # kept for compatibility / informational only
+    "URL_LIMIT": 50,
     "INCREMENTAL_SAVE_INTERVAL": 10,
-    "HEADLESS": True,  # Set to False for debugging, True for production
+    "HEADLESS": False,  # Set to False for GUI
 }
 
 # --- Selenium Setup ---
@@ -52,11 +53,12 @@ def start_driver(headless=False):
     return driver
 
 # --- Helper Functions  ---
-def safe_find(driver, by, value, timeout=10):
+def safe_find(driver, by, value, timeout=5):
     try:
         return WebDriverWait(driver, timeout).until(EC.presence_of_element_located((by, value)))
     except TimeoutException:
         return None
+
 
 def safe_click(driver, element, timeout=5):
     try:
@@ -72,6 +74,7 @@ def safe_click(driver, element, timeout=5):
             return False
     except Exception:
         return False
+
 
 def handle_popups(driver):
     """Attempts to close common Myntra pop-ups."""
@@ -107,6 +110,7 @@ def handle_popups(driver):
 
     return False
 
+
 def enter_pincode(driver, pincode):
     attempts = [
         (By.CSS_SELECTOR, "input[placeholder*='Pincode']"),
@@ -124,10 +128,10 @@ def enter_pincode(driver, pincode):
                 el.send_keys(pincode)
 
                 btn_selectors = [
-                    (By.XPATH, "//button[contains(., 'Check')]"),
-                    (By.XPATH, "//button[contains(., 'Apply')]"),
-                    (By.XPATH, "//button[contains(., 'CHECK')]"),
-                    (By.XPATH, "//button[contains(., 'Apply Pincode')]"),
+                    (By.XPATH, "//button[contains(., 'Check')]),"),
+                    (By.XPATH, "//button[contains(., 'Apply')]),"),
+                    (By.XPATH, "//button[contains(., 'CHECK')]),"),
+                    (By.XPATH, "//button[contains(., 'Apply Pincode')]),"),
                     (By.CSS_SELECTOR, "div.pincode-check-container button"),
                 ]
                 for bby, bsel in btn_selectors:
@@ -142,6 +146,7 @@ def enter_pincode(driver, pincode):
             except Exception:
                 continue
     return False
+
 
 def click_first_size(driver):
     candidates = [
@@ -176,6 +181,7 @@ def click_first_size(driver):
                 continue
     return False
 
+
 def find_seller_name(driver):
     try:
         seller_element = safe_find(driver, By.CSS_SELECTOR, "div.supplier-supplier span.supplier-productSellerName", timeout=5)
@@ -197,7 +203,7 @@ def find_seller_name(driver):
             "//span[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sold by')]/following-sibling::*",
             "//div[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sold by')]/span",
             "//div[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sold by')]",
-            "//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'seller:')]"
+            "//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'seller:')]",
         ]
         for xpath_sel in xpath_selectors:
             elems = driver.find_elements(By.XPATH, xpath_sel)
@@ -221,6 +227,7 @@ def find_seller_name(driver):
     except Exception:
         pass
     return None
+
 
 def get_delivery_info(driver):
     try:
@@ -339,24 +346,23 @@ def scrape_url(url_no, url, driver):
         print(f"Finished #{url_no} | {initial_url} | Current URL: {current_url} | Status: {data['Status']} | Seller: {data['SellerNames']} | Delivery: {data['Delivery']} | Notes: {data['Notes']}")
     return data
 
-# --- Multi-threaded Orchestration ---
-def worker_initializer(headless_mode):
-    return start_driver(headless=headless_mode)
-
-def worker_shutdown(driver):
-    if driver:
-        driver.quit()
+# --- Sequential Orchestration (single instance at a time) ---
 
 def main():
-    print("Starting Myntra Scraper...")
+    print("Starting Myntra Scraper (sequential single-instance mode)...")
     print(f"Configuration: {CONFIG}")
 
     try:
         df_input = pd.read_excel(CONFIG["INPUT_XLSX"])
-        urls_to_scrape = df_input["URL"].tolist()
+        # keep original indices to preserve URL_No
+        indexed_urls = list(df_input["URL"].items())  # returns list of (index, url)
+        # Convert to 1-based numbering matching original file
+        indexed_urls = [(idx + 1, url) for idx, url in enumerate(df_input["URL"].tolist())]
+
         if CONFIG["URL_LIMIT"] is not None:
-            urls_to_scrape = urls_to_scrape[:CONFIG["URL_LIMIT"]]
-        print(f"Loaded {len(urls_to_scrape)} URLs from {CONFIG['INPUT_XLSX']}.")
+            indexed_urls = indexed_urls[:CONFIG["URL_LIMIT"]]
+
+        print(f"Loaded {len(indexed_urls)} URLs from {CONFIG['INPUT_XLSX']}. (Using original file order and numbering)")
     except FileNotFoundError:
         print(f"Error: Input file '{CONFIG['INPUT_XLSX']}' not found.")
         return
@@ -365,49 +371,78 @@ def main():
         return
 
     all_results = []
+    processed_set = set()
     if os.path.exists(CONFIG["OUTPUT_XLSX"]):
         try:
             existing_df = pd.read_excel(CONFIG["OUTPUT_XLSX"])
             all_results.extend(existing_df.to_dict('records'))
             print(f"Loaded {len(existing_df)} existing records from {CONFIG['OUTPUT_XLSX']}.")
-            processed_urls = set(existing_df["URL"].tolist())
-            urls_to_scrape = [url for url in urls_to_scrape if url not in processed_urls]
-            print(f"Remaining {len(urls_to_scrape)} URLs to scrape (excluding already processed).")
+            processed_set = set(existing_df["URL"].tolist())
+            # Filter out already processed URLs while preserving original numbering
+            indexed_urls = [(i, u) for (i, u) in indexed_urls if u not in processed_set]
+            print(f"Remaining {len(indexed_urls)} URLs to scrape (excluding already processed).")
         except Exception as e:
             print(f"Warning: Could not load existing '{CONFIG['OUTPUT_XLSX']}' for appending: {e}")
 
-    # Submit tasks with url index (1-based)
-    with ThreadPoolExecutor(max_workers=CONFIG["NUM_WORKERS"]) as executor:
-        futures = {}
-        for idx, url in enumerate(urls_to_scrape, start=1):
-            driver_instance = worker_initializer(CONFIG["HEADLESS"])
-            futures[executor.submit(scrape_url, idx, url, driver_instance)] = (idx, url, driver_instance)
+    processed_count = 0
 
-        processed_count = 0
-        for future in as_completed(futures):
-            idx, url, driver_instance = futures[future]
+    for url_no, url in indexed_urls:
+        driver = None
+        try:
+            # Start one driver instance for this URL
+            driver = start_driver(headless=CONFIG["HEADLESS"])
+        except Exception as e:
+            print(f"Could not start driver for URL #{url_no} ({url}): {e}")
+            # record a failed row and continue
+            failed_row = {
+                "URL_No": url_no,
+                "URL": url,
+                "SellerNames": "",
+                "SellerIDs": "",
+                "Delivery": "",
+                "Status": "500",
+                "Notes": f"Failed to start webdriver: {e};"
+            }
+            all_results.append(failed_row)
+            processed_count += 1
+            if processed_count % CONFIG["INCREMENTAL_SAVE_INTERVAL"] == 0:
+                pd.DataFrame(all_results).to_excel(CONFIG["OUTPUT_XLSX"], index=False)
+            continue
+
+        try:
+            result = scrape_url(url_no, url, driver)
+            all_results.append(result)
+            processed_count += 1
+
+            if processed_count % CONFIG["INCREMENTAL_SAVE_INTERVAL"] == 0:
+                print(f"\n--- Saving {processed_count} results incrementally to {CONFIG['OUTPUT_XLSX']} ---")
+                pd.DataFrame(all_results).to_excel(CONFIG["OUTPUT_XLSX"], index=False)
+                print("--- Incremental save complete ---")
+
+        except Exception as e:
+            print(f"Unexpected error scraping URL #{url_no} ({url}): {e}")
+            all_results.append({
+                "URL_No": url_no,
+                "URL": url,
+                "SellerNames": "",
+                "SellerIDs": "",
+                "Delivery": "",
+                "Status": "500",
+                "Notes": f"Unhandled exception during scrape: {e};"
+            })
+            processed_count += 1
+        finally:
+            # Ensure driver is closed before moving to next URL
             try:
-                result = future.result()
-                all_results.append(result)
-                processed_count += 1
-
-                if processed_count % CONFIG["INCREMENTAL_SAVE_INTERVAL"] == 0:
-                    print(f"\n--- Saving {processed_count} results incrementally to {CONFIG['OUTPUT_XLSX']} ---")
-                    pd.DataFrame(all_results).to_excel(CONFIG["OUTPUT_XLSX"], index=False)
-                    print("--- Incremental save complete ---")
-
-            except Exception as e:
-                print(f"Error processing URL #{idx} ({url}): {e}")
-            finally:
-                # ensure each worker's driver is quit after its job completes
-                try:
-                    worker_shutdown(driver_instance)
-                except Exception:
-                    pass
+                if driver:
+                    driver.quit()
+            except Exception:
+                pass
 
     print(f"\nScraping complete. Saving all {len(all_results)} results to {CONFIG['OUTPUT_XLSX']}")
     pd.DataFrame(all_results).to_excel(CONFIG["OUTPUT_XLSX"], index=False)
     print("All results saved.")
+
 
 if __name__ == "__main__":
     main()
